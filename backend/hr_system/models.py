@@ -92,6 +92,13 @@ class Question(models.Model):
     expected_skills = models.TextField()
     time_limit = models.IntegerField(help_text="Seconds or Minutes depending on type")
     order = models.IntegerField(default=0)
+    
+    # Dynamic Generation Metadata
+    focus_area = models.CharField(max_length=255, blank=True, null=True, help_text="Area of focus for this question")
+    difficulty = models.CharField(max_length=50, blank=True, null=True, help_text="Question difficulty level")
+    gemini_metadata = models.JSONField(default=dict, blank=True, help_text="Metadata from Gemini generation")
+    generated_at = models.DateTimeField(auto_now_add=True, help_text="When this question was generated")
+    is_dynamic = models.BooleanField(default=True, help_text="Whether this was dynamically generated")
 
 class Answer(models.Model):
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='answers')

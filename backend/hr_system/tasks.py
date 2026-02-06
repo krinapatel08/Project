@@ -132,9 +132,9 @@ def process_candidate_task(candidate_id):
         if not session.questions.filter(question_type='ORAL').exists():
             generate_oral_questions(session, job.description, resume_text)
 
-        # 5. Select Coding Questions (From Bank)
+        # 5. Generate Coding Questions (Gemini - DYNAMIC, NO BANK)
         if not session.questions.filter(question_type='CODING').exists():
-            select_coding_questions(session, job)
+            generate_coding_questions(session, job.description, resume_text)
 
         # 6. Email Link
         send_interview_email_task(candidate.id, link.token)
@@ -144,105 +144,106 @@ def process_candidate_task(candidate_id):
 
 def generate_oral_questions(session, jd_text, resume_text):
     """
-    Uses Gemini to generate oral questions based on JD and Resume.
+    Uses Gemini to generate DYNAMIC oral questions based on JD and Resume.
+    Each candidate gets unique questions tailored to their background.
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("--- [TASK] No Gemini API Key found. Using Smart Fallback for questions. ---")
-        # Try to get skills from resume_text
-        detected_skills = []
-        keywords = ["Python", "Java", "JavaScript", "React", "Node", "Django", "SQL", "AWS", "Docker", "Machine Learning"]
-        for kw in keywords:
-            if kw.lower() in resume_text.lower():
-                detected_skills.append(kw)
-        
-        skill_str = ", ".join(detected_skills) if detected_skills else "your technical background"
-        
-        for i in range(session.oral_question_count):
-            if i == 0:
-                q_text = f"Hello {session.candidate.name}, can you describe your experience with {skill_str} as it relates to this role?"
-            elif i == 1:
-                q_text = f"Based on your resume, what was the most challenging project you worked on using {detected_skills[0] if detected_skills else 'your core skills'}?"
-            else:
-                q_text = f"How would you apply your knowledge of {skill_str} to solve complex problems in a fast-paced environment?"
-
-            Question.objects.create(
-                session=session,
-                text=q_text,
-                question_type='ORAL',
-                expected_skills=skill_str,
-                time_limit=session.thinking_time * 60,
-                order=i
-            )
-        return
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-pro')
+    from .gemini_service import get_gemini_generator
     
-    prompt = f"""
-    You are an expert technical interviewer. I will provide you with a Job Description (JD) and a Candidate's Resume (Raw Text).
-    Your goal is to generate {session.oral_question_count} high-quality, open-ended interview questions that:
-    1.  **Validate Experience**: Ask specifically about projects or achievements mentioned in the resume as they relate to the JD.
-    2.  **Test Technical Depth**: Explore the candidate's understanding of key technologies listed in the JD that are also present in their resume.
-    3.  **Scenario Based**: Present a challenge likely to be encountered in this specific role and ask how they would solve it.
-
-    Job Description:
-    {jd_text}
+    print(f"--- [DYNAMIC GENERATION] Generating {session.oral_question_count} oral questions for {session.candidate.name} ---")
     
-    Candidate Resume (Raw Text):
-    {resume_text}
+    generator = get_gemini_generator()
+    job = session.candidate.job
     
-    Output format:
-    Provide only the questions, one per line. No introduction or labels.
-    """
+    # Get candidate metadata for better context
+    resume_obj = getattr(session.candidate, 'resume_data', None)
+    metadata = resume_obj.extracted_metadata if resume_obj else {}
     
-    try:
-        response = model.generate_content(prompt)
-        questions = response.text.strip().split('\n')
-        # Filter out empty lines or labels
-        questions = [q.strip() for q in questions if q.strip() and not q.strip().lower().startswith('question')]
-        
-        for i, q_text in enumerate(questions[:session.oral_question_count]):
-            # If AI returns fewer questions, we might need a fallback or just accept it
-            Question.objects.create(
-                session=session,
-                text=q_text,
-                question_type='ORAL',
-                expected_skills=f"Tailored to {session.candidate.job.title}",
-                time_limit=session.thinking_time * 60,
-                order=i
-            )
-    except Exception as e:
-        print(f"Gemini Error: {str(e)}")
-        # Fallback to smart logic if AI fails even with key
-        for i in range(session.oral_question_count):
-            Question.objects.create(
-                session=session,
-                text=f"Regarding the {session.candidate.job.title} role, how do your previous experiences prepare you for its key responsibilities?",
-                question_type='ORAL',
-                expected_skills="Core Competencies",
-                time_limit=session.thinking_time * 60,
-                order=i
-            )
-
-def select_coding_questions(session, job):
-    """
-    Selects coding questions from the predefined bank.
-    """
-    # Simple selection logic: filter by role type or difficulty if available
-    bank_questions = CodingQuestionBank.objects.filter(role_type=job.title).order_by('?')[:session.coding_question_count]
-    if not bank_questions.exists():
-        bank_questions = CodingQuestionBank.objects.all().order_by('?')[:session.coding_question_count]
-        
-    for i, bq in enumerate(bank_questions):
+    # Generate questions using Gemini
+    questions_data = generator.generate_oral_questions(
+        jd_text=jd_text,
+        resume_text=resume_text,
+        candidate_name=session.candidate.name,
+        experience_level=job.experience_level,
+        required_skills=job.required_skills,
+        num_questions=session.oral_question_count
+    )
+    
+    # Create Question objects with full metadata
+    for i, q_data in enumerate(questions_data):
         Question.objects.create(
             session=session,
-            text=bq.text,
-            question_type='CODING',
-            expected_skills=bq.skills,
-            time_limit=session.coding_time,
-            order=session.oral_question_count + i
+            text=q_data.get('question', 'Question generation failed'),
+            question_type='ORAL',
+            expected_skills=', '.join(q_data.get('expected_skills', [])) if isinstance(q_data.get('expected_skills'), list) else str(q_data.get('expected_skills', 'General')),
+            time_limit=session.thinking_time * 60,
+            order=i,
+            focus_area=q_data.get('focus_area', 'General'),
+            difficulty=q_data.get('difficulty', 'Medium'),
+            gemini_metadata={
+                'generated_by': 'gemini' if generator.is_available() else 'fallback',
+                'candidate_id': session.candidate.id,
+                'job_id': job.id,
+                'generation_timestamp': str(timezone.now()),
+                'resume_based': True,
+                'jd_based': True
+            },
+            is_dynamic=True
         )
+    
+    print(f"--- [DYNAMIC GENERATION] Successfully created {len(questions_data)} oral questions ---")
+
+def generate_coding_questions(session, jd_text, resume_text):
+    """
+    Uses Gemini to generate DYNAMIC coding questions based on JD and Resume.
+    NO STATIC QUESTION BANK IS USED.
+    Each candidate gets unique coding problems tailored to the role and their skills.
+    """
+    from .gemini_service import get_gemini_generator
+    
+    print(f"--- [DYNAMIC GENERATION] Generating {session.coding_question_count} coding questions for {session.candidate.name} ---")
+    
+    generator = get_gemini_generator()
+    job = session.candidate.job
+    
+    # Generate coding questions using Gemini
+    questions_data = generator.generate_coding_questions(
+        jd_text=jd_text,
+        resume_text=resume_text,
+        experience_level=job.experience_level,
+        required_skills=job.required_skills,
+        num_questions=session.coding_question_count
+    )
+    
+    # Create Question objects with full metadata
+    for i, q_data in enumerate(questions_data):
+        # Combine problem and input/output format for the full question text
+        full_problem = q_data.get('problem', 'Coding problem generation failed')
+        io_format = q_data.get('input_output_format', '')
+        if io_format:
+            full_problem += f"\n\n{io_format}"
+        
+        Question.objects.create(
+            session=session,
+            text=full_problem,
+            question_type='CODING',
+            expected_skills=', '.join(q_data.get('expected_skills', [])) if isinstance(q_data.get('expected_skills'), list) else str(q_data.get('expected_skills', 'Programming')),
+            time_limit=session.coding_time,
+            order=session.oral_question_count + i,
+            focus_area=q_data.get('focus_area', 'Coding Challenge'),
+            difficulty=q_data.get('difficulty', 'Medium'),
+            gemini_metadata={
+                'generated_by': 'gemini' if generator.is_available() else 'fallback',
+                'candidate_id': session.candidate.id,
+                'job_id': job.id,
+                'generation_timestamp': str(timezone.now()),
+                'resume_based': True,
+                'jd_based': True,
+                'problem_type': 'coding_challenge'
+            },
+            is_dynamic=True
+        )
+    
+    print(f"--- [DYNAMIC GENERATION] Successfully created {len(questions_data)} coding questions ---")
 
 def extract_resume_metadata(resume_text, candidate):
     """

@@ -42,4 +42,8 @@ class QuestionSerializer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, read_only=True)
     class Meta:
         model = Question
-        fields = ['id', 'text', 'question_type', 'expected_skills', 'time_limit', 'order', 'answers']
+        fields = [
+            'id', 'text', 'question_type', 'expected_skills', 'time_limit', 'order', 
+            'focus_area', 'difficulty', 'gemini_metadata', 'generated_at', 'is_dynamic',
+            'answers'
+        ]
